@@ -2,140 +2,136 @@
 # LSrouter.py
 # Name: Đỗ Văn Dũng
 # HUID: 23021492
-####################################################
+#####################################################
 
 from router import Router
 from packet import Packet
 import json
 import heapq
 
+
 class LSrouter(Router):
-    """Link state routing protocol implementation."""
+    """Link state routing protocol implementation.
+
+    Add your own class fields and initialization code (e.g. to create forwarding table
+    data structures). See the `Router` base class for docstrings of the methods to
+    override.
+    """
 
     def __init__(self, addr, heartbeat_time):
-        super().__init__(addr)  # Initialize base class
+        Router.__init__(self, addr)  # Initialize base class - DO NOT REMOVE
         self.heartbeat_time = heartbeat_time
         self.last_time = 0
-        # sequence number for our LSPs
-        self.sequence = 0
-        # port -> neighbor router address and cost
-        self.neighbors = {}       # port -> cost
-        self.port2nbr = {}        # port -> addr
-        # link-state database: addr -> (seq, {neighbor: cost, ...})
-        self.lsdb = {}       # forwarding table: dest_addr -> port
+        # TODO
+        #   add your own class fields and initialization code here
+        self.neighbors = {}  
+        self.link_state_db = {}
+        self.seq_num = 0  
         self.forwarding_table = {}
-
-    def broadcast_lsp(self):
-        """Create and flood our LSP to all neighbors."""
-        self.sequence += 1
-        # Our LSP: include our addr, seq, and current neighbors
-        lsp = {
-            'origin': self.addr,
-            'seq': self.sequence,
-            'links': { self.port2nbr[p]: cost for p, cost in self.neighbors.items() }
-        }
-        content = json.dumps(lsp)
+        
+    def broadcast_link_state(self):
+        self.seq_num += 1
+        links = []
+        for port, (neighbor, cost) in self.neighbors.items():
+            links.append((neighbor, cost))
+        self.link_state_db[self.addr] = {"seq": self.seq_num, "links": links}
+        lsa = json.dumps({"src": self.addr, "seq": self.seq_num, "links": links})
         for port in self.neighbors:
-            p = Packet(kind=Packet.ROUTING,
-                       src_addr=self.addr,
-                       dst_addr=None,
-                       content=content)
-            self.send(port, p)
+            self.send(port, Packet(self.addr, port, False, lsa))
 
-    def recompute_routes(self):
-        """
-        Run Dijkstra on current LSDB to build forwarding table.
-        """
-        # Build graph from lsdb
+        self.dijkstra()
+
+    def dijkstra(self):
         graph = {}
-        for node, (seq, links) in self.lsdb.items():
-            graph[node] = links.copy()
-        # Dijkstra from self.addr
+        for router, info in self.link_state_db.items():
+            graph[router] = {}
+            for neighbor, cost in info["links"]:
+                graph[router][neighbor] = cost
+                
         dist = {self.addr: 0}
         prev = {}
         visited = set()
         heap = [(0, self.addr)]
+
         while heap:
-            d, u = heapq.heappop(heap)
-            if u in visited:
+            curr_dist, curr = heapq.heappop(heap)
+            if curr in visited:
                 continue
-            visited.add(u)
-            for v, w in graph.get(u, {}).items():
-                nd = d + w
-                if nd < dist.get(v, float('inf')):
-                    dist[v] = nd
-                    prev[v] = u
-                    heapq.heappush(heap, (nd, v))
-        # Build forwarding table: for each destination, find first hop
-        ft = {}
+            visited.add(curr)
+
+            for neighbor in graph.get(curr, {}):
+                new_dist = curr_dist + graph[curr][neighbor]
+                if neighbor not in dist or new_dist < dist[neighbor]:
+                    dist[neighbor] = new_dist
+                    prev[neighbor] = curr
+                    heapq.heappush(heap, (new_dist, neighbor))
+
+        self.forwarding_table = {}
         for dest in dist:
             if dest == self.addr:
                 continue
-            # backtrack from dest to neighbor
-            curr = dest
-            while prev.get(curr) != self.addr:
-                curr = prev[curr]
-            # curr is neighbor next hop
-            # find port for neighbor curr
-            for port, nbr in self.port2nbr.items():
-                if nbr == curr:
-                    ft[dest] = port
+            next_hop = dest
+            while prev[next_hop] != self.addr:
+                next_hop = prev[next_hop]
+            for port, (neighbor, _) in self.neighbors.items():
+                if neighbor == next_hop:
+                    self.forwarding_table[dest] = port
                     break
-        self.forwarding_table = ft
 
     def handle_packet(self, port, packet):
+        """Process incoming packet."""
+        # TODO
         if packet.is_traceroute:
-            dst = packet.dst_addr
-            if dst in self.forwarding_table:
-                self.send(self.forwarding_table[dst], packet)
+            # Hint: this is a normal data packet
+            # If the forwarding table contains packet.dst_addr
+            #   send packet based on forwarding table, e.g., self.send(port, packet)
+            if packet.dst_addr in self.forwarding_table:
+                out_port = self.forwarding_table[packet.dst_addr]
+                self.send(out_port, packet)
         else:
-            # Received LSP
-            lsp = json.loads(packet.content)
-            origin = lsp['origin']
-            seq = lsp['seq']
-            links = lsp['links']
-            # Check if new or newer
-            old = self.lsdb.get(origin)
-            if old is None or seq > old[0]:
-                # update LSDB
-                self.lsdb[origin] = (seq, links)
-                # flood to other neighbors
+            # Hint: this is a routing packet generated by your routing protocol
+            # If the sequence number is higher and the received link state is different
+            #   update the local copy of the link state
+            #   update the forwarding table
+            #   broadcast the packet to other neighbors
+            lsa = json.loads(packet.content)
+            src = lsa["src"]
+            seq = lsa["seq"]
+            links = lsa["links"]
+            if src not in self.link_state_db or self.link_state_db[src]["seq"] < seq:
+                self.link_state_db[src] = {"seq": seq, "links": links}
+                self.dijkstra()
                 for p in self.neighbors:
                     if p != port:
-                        pck = Packet(kind=Packet.ROUTING,
-                                     src_addr=self.addr,
-                                     dst_addr=None,
-                                     content=packet.content)
-                        self.send(p, pck)
-                # recompute routes
-                self.recompute_routes()
+                        self.send(p, packet)
 
     def handle_new_link(self, port, endpoint, cost):
-        # neighbor added
-        self.neighbors[port] = cost
-        self.port2nbr[port] = endpoint
-        # update own LSP and flood
-        self.broadcast_lsp()
-        # recompute routes including self
-        self.lsdb[self.addr] = (self.sequence, {self.port2nbr[p]: self.neighbors[p] for p in self.neighbors})
-        self.recompute_routes()
+        """Handle new link."""
+        # TODO
+        #   update local data structures and forwarding table
+        #   broadcast the new link state of this router to all neighbors
+        self.neighbors[port] = (endpoint, cost)
+        self.broadcast_link_state()
 
     def handle_remove_link(self, port):
-        # neighbor removed
+        """Handle removed link."""
+        # TODO
+        #   update local data structures and forwarding table
+        #   broadcast the new link state of this router to all neighbors
         if port in self.neighbors:
-            self.neighbors.pop(port)
-            self.port2nbr.pop(port)
-            # flood updated LSP
-            self.broadcast_lsp()
-            # update LSDB self entry
-            self.lsdb[self.addr] = (self.sequence, {self.port2nbr[p]: self.neighbors[p] for p in self.neighbors})
-            self.recompute_routes()
+            del self.neighbors[port]
+        self.broadcast_link_state()
 
     def handle_time(self, time_ms):
+        """Handle current time."""
         if time_ms - self.last_time >= self.heartbeat_time:
             self.last_time = time_ms
-            # periodic LSP flood
-            self.broadcast_lsp()
+            # TODO
+            #   broadcast the link state of this router to all neighbors
+            self.broadcast_link_state()
 
     def __repr__(self):
-        return f"LSrouter(addr={self.addr}, ft={self.forwarding_table})"
+        """Representation for debugging in the network visualizer."""
+        # TODO
+        #   NOTE This method is for your own convenience and will not be graded
+        return f"LSrouter(addr={self.addr})"
